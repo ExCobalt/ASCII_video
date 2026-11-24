@@ -1,0 +1,5 @@
+# Only the Linux diagnostic bundle and its clean-system probe enter this image.
+*
+!dist/linux/ascii-video/
+!tests/check_linux_packaged.sh
+!tests/check_linux_window.sh

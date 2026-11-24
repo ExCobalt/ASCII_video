@@ -1,0 +1,11 @@
+include uv.lock BUILDING.md DISTRIBUTION.md
+include .gitattributes .dockerignore .github/workflows/ci.yml
+include src/_glyphs.pyx src/_diffusion.pyx
+include scripts/native_notices.json
+recursive-include scripts *.ps1 *.py *.sh
+include tests/*.py tests/*.ps1 tests/*.sh tests/*.Dockerfile
+exclude tests/profile_*.py
+include tests/check_macos_window.swift
+
+exclude src/_glyphs.c src/_diffusion.c AGENTS.md
+prune .codex-spec

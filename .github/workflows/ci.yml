@@ -1,0 +1,192 @@
+name: Package smoke checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      # Exercise installation without requiring a platform-specific C compiler.
+      ASCII_VIDEO_PURE_PYTHON: '1'
+      UV_PYTHON_DOWNLOADS: never
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Install Linux audio library
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+      - name: Install locked environment
+        run: |
+          python -m pip install uv==0.12.17
+          uv sync --locked --python 3.12 --group build
+      - name: Audit locked runtime and build dependencies
+        run: uv audit --locked --python-version 3.12
+      - name: Check CLI, resources, and packaging contracts
+        run: |
+          uv run --locked --group build ascii-video --version
+          uv run --locked --group build ascii-video play --help
+          uv run --locked --group build ascii-video render --help
+          for pattern in test_cli.py test_main.py test_resources.py test_release_licenses.py; do
+            uv run --locked --group build python tests/run_suite.py --pattern "$pattern"
+          done
+      - name: Build wheel from source archive
+        run: uv run --locked --group build python -m build --no-isolation --outdir build/packages
+      - name: Exercise test helpers shipped in the source archive
+        run: |
+          tar -xf build/packages/*.tar.gz -C build/packages
+          for pattern in test_audio_index_prototype.py test_render_optimizations.py test_source_owned_frame_candidate.py test_source_prefetch_candidate.py; do
+            uv run --locked --group build python build/packages/ascii_video-*/tests/run_suite.py --pattern "$pattern"
+          done
+      - name: Install wheel outside checkout and export silently
+        run: |
+          uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file build/runtime-requirements.txt
+          uv venv --python 3.12 build/package-check
+          if [ "$RUNNER_OS" = Windows ]; then
+            package_python="$PWD/build/package-check/Scripts/python.exe"
+            package_exe="$PWD/build/package-check/Scripts/ascii-video.exe"
+          else
+            package_python="$PWD/build/package-check/bin/python"
+            package_exe="$PWD/build/package-check/bin/ascii-video"
+          fi
+          uv pip install --python "$package_python" --require-hashes -r build/runtime-requirements.txt
+          uv pip install --python "$package_python" --no-deps build/packages/*.whl
+          # The child process runs from a temporary directory and never adds src/ to its path.
+          uv run --locked --group build python tests/check_packaged_export.py --executable "$package_exe"
+          cd build/package-check
+          "$package_python" -I -m cli --version
+          "$package_python" -I -c "from resources import resource_path; names = ['DejaVuSansMono.ttf', 'blue-noise.npy', 'ascii-video.ico', 'ascii-video.png']; paths = [resource_path(n) for n in names]; assert all(p is not None and p.is_file() for p in paths), paths; print(*paths, sep='\n')"
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-15-intel, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          # Windows and macOS install their pinned build runtime separately.
+          python-version: ${{ runner.os == 'Linux' && '3.12.16' || '3.12' }}
+      - run: python -m pip install uv==0.12.17
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y build-essential libportaudio2 libxcb1 libasound2-data libtk8.6 xvfb xauth
+      - name: Install Linux build environment
+        if: runner.os == 'Linux'
+        run: uv sync --locked --python "$(command -v python)" --group build
+      - name: Install locked macOS build environment
+        if: runner.os == 'macOS'
+        run: |
+          case "$(uname -s)-$(uname -m)" in
+            Darwin-x86_64) target=x86_64-apple-darwin; digest=b78a4c479f1964ec484880bee567568266f68da102269fb93a05fe8716b45f91 ;;
+            Darwin-arm64) target=aarch64-apple-darwin; digest=2f11b8aa3726bdbd87dd9eb76568412faddf4f47e26913fa45d6a2e424972acd ;;
+            *) exit 1 ;;
+          esac
+          mkdir -p .python/desktop
+          curl --fail --location --retry 2 "https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.12.16%2B20261110-${target}-install_only_stripped.tar.gz" -o .python/desktop/runtime.tar.gz
+          echo "$digest  .python/desktop/runtime.tar.gz" | shasum -a 256 -c -
+          tar -xf .python/desktop/runtime.tar.gz -C .python/desktop
+          uv sync --locked --python .python/desktop/python/bin/python3.12 --group build
+      - name: Build using the inspected Windows runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.12.16%2B20261110-x86_64-pc-windows-msvc-install_only_stripped.tar.gz'
+          $runtime = New-Item -ItemType Directory -Path .python/windows-release -Force
+          $archive = Join-Path $runtime.FullName runtime.tar.gz
+          Invoke-WebRequest $url -OutFile $archive
+          if ((Get-FileHash $archive).Hash -ne '355ee61b8207b91574491b1c6dc9b0ebb4408fc56bfafe498f3ef439314b52dc') { throw 'Unexpected Python runtime' }
+          tar -xf $archive -C $runtime.FullName
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          uv sync --locked --python .python/windows-release/python/python.exe --group build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/build_windows.ps1
+      - name: Build Linux bundle
+        if: runner.os == 'Linux'
+        run: bash scripts/build_linux.sh
+      - name: Build macOS bundle and observe its GUI window
+        if: runner.os == 'macOS'
+        run: |
+          bash scripts/build_macos.sh
+          swift tests/check_macos_window.swift "$PWD/dist/macos/ASCII-Video.app/Contents/MacOS/ASCII-Video"
+          for pattern in test_opus_cursor_factory.py test_export.py; do
+            .venv/bin/python tests/run_suite.py --pattern "$pattern"
+          done
+      - name: Prepare acceptance clip with audio
+        run: |
+          mkdir -p build/desktop-check
+          uv run --locked --group build python -c "from pathlib import Path; import sys; sys.path.insert(0, 'tests'); from test_export import fixture; fixture(Path('build/desktop-check/input.mp4'), list(range(30)), audio_offset=0, audio_samples=48000)"
+      - name: Check Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tests/check_windows_packaged.ps1 -Executable dist/ascii-video.exe -InputVideo build/desktop-check/input.mp4 -OutputDirectory build/desktop-check/windows
+      - name: Check Linux bundle offline without Python or FFmpeg
+        if: runner.os == 'Linux'
+        run: |
+          docker build -f tests/linux-clean.Dockerfile -t ascii-video-clean .
+          mkdir -p build/desktop-check/out
+          docker run --rm --network none -v "$PWD/build/desktop-check/input.mp4:/input.mp4:ro" -v "$PWD/build/desktop-check/out:/out" ascii-video-clean
+      - name: Stage private macOS acceptance handoff
+        if: runner.os == 'macOS' && github.event.repository.private
+        run: |
+          tar -czf build/desktop-check/mac-test.tar.gz -C "$PWD/dist/macos" ASCII-Video.app \
+            -C "$PWD/build/desktop-check" input.mp4 -C "$PWD/tests" check_macos_packaged.sh check_macos_window.swift
+      - name: Transfer private test bundle
+        if: runner.os == 'macOS' && github.event.repository.private
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: private-mac-test-${{ matrix.os }}
+          path: build/desktop-check/mac-test.tar.gz
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  mac-portability:
+    if: github.event.repository.private
+    needs: desktop
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Retrieve private test bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: private-mac-test-${{ matrix.os }}
+          path: ${{ runner.temp }}/mac-test
+      - name: Exercise relocated app on a fresh VM without a checkout or dependency installation
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/mac-test"
+          tar -xf mac-test.tar.gz
+          mkdir home tmp output
+          env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME="$PWD/home" TMPDIR="$PWD/tmp" \
+            /bin/bash check_macos_packaged.sh ASCII-Video.app input.mp4 output

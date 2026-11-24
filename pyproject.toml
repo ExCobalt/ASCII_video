@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools==84.1.0", "Cython==3.3.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ascii-video"
+version = "0.3.1"
+description = "ASCII video player, graphical preview, and MP4/WebM export"
+readme = "README.md"
+# Original code is MIT; the distribution also contains attributed code and a font.
+license = "MIT AND MIT-CMU AND ImageMagick AND LicenseRef-DejaVu"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "DISTRIBUTION.md"]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "av>=19.0.1",
+    "darkdetect>=0.8,<1",
+    "numpy>=2",
+    "pillow>=13.0.0",
+    "sounddevice>=0.5",
+    "ttkbootstrap>=2.2.7,<3",
+]
+
+[project.scripts]
+ascii-video = "cli:main"
+
+[dependency-groups]
+build = ["pyinstaller>=6", "build>=1", "Cython==3.3.0"]
+
+[tool.setuptools]
+py-modules = ["main", "cli", "cli_options", "rendering", "terminal", "media", "audio", "audio_cursor", "opus_cursor", "player", "controls", "console_font", "raster", "export", "gui", "progress", "dithering", "diffusion", "preview", "resources"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.data-files]
+"share/ascii-video" = ["assets/DejaVuSansMono.ttf", "assets/ascii-video.png", "assets/ascii-video.ico", "assets/blue-noise.npy"]
